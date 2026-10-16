@@ -7,7 +7,7 @@
   </p>
   <br />
     <a href="https://alexandruc.com">
-    <img src="https://cdn.alexandruc.com/portfolio/projects/summerwell.png" alt="thumbnail">
+    <img src="https://cdn.alexandruc.com/portfolio/projects/churros.png" alt="thumbnail">
   </a>
 </div>
 
