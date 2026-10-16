@@ -9,16 +9,14 @@
 #include "animatii.h" 
 
 // de modificat in functie de planta
-
 const unsigned long WATER_INTERVAL = 3; // zile dintre udari
-const int LIGHT_EXPOSURE = 150; //minim
+const int LIGHT_EXPOSURE = 200; //minim
 const float HUMIDITY_EXPOSURE = 40.0; // umiditate minima
 const float TEMPERATURE = 18.0; //minim temperatura
-
 // -----------------------------------
-//
 
-const unsigned long WATER_TIMEOUT = WATER_INTERVAL * 86400000UL; // transformare zile in milisecunde
+const unsigned long DAY_IN_MS = 86400000UL;
+const unsigned long WATER_TIMEOUT = WATER_INTERVAL * DAY_IN_MS; 
 
 #define SOIL_PIN 4
 #define LIGHT_PIN 5
@@ -37,10 +35,10 @@ int neglectLevel = 0;
 const int angryThreshold = 5;
 
 unsigned long lastWateringTime = 0; 
-bool isHydrated = true; 
+unsigned long lastLightTime = 0;
+unsigned long lastCareCheckTime = 0;
 
-float days = 0.0;
-int streak = 0;
+bool isHydrated = true; 
 
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_GC9A01 _panel_instance;
@@ -101,7 +99,6 @@ void GIFDraw(GIFDRAW *pDraw) {
 
 void playGif(const uint8_t *gifData, int gifSize, int repetitions, bool freezeLastFrame) {
   gif.begin(BIG_ENDIAN_PIXELS);
-  
   if (gif.open((uint8_t *)gifData, gifSize, GIFDraw)) {
     int delay_ms = 0;
     for (int r = 0; r < repetitions; r++) {
@@ -122,12 +119,14 @@ void setup() {
   neglectLevel = memory.getInt("neglect", 0); 
   isHydrated = memory.getBool("hydrated", true); 
 
+  unsigned long currentMillis = millis();
+  lastCareCheckTime = currentMillis;
+  lastLightTime = currentMillis;
+
   if (isHydrated) {
-    lastWateringTime = millis();
-    streak = 0;
+    lastWateringTime = currentMillis;
   } else {
-    lastWateringTime = millis() - WATER_TIMEOUT;
-    streak = WATER_INTERVAL;
+    lastWateringTime = currentMillis - WATER_TIMEOUT;
   }
 
   lcd.setColorDepth(16);
@@ -137,15 +136,16 @@ void setup() {
 
   Wire.begin(I2C_SDA, I2C_SCL);
   aht.begin();
-
   randomSeed(analogRead(9)); 
 
   playGif(blink, sizeof(blink), 1, true);
 }
 
 void loop() {
-  if (millis() - lastSensorCheck >= 2000) {
-    lastSensorCheck = millis();
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastSensorCheck >= 2000) {
+    lastSensorCheck = currentMillis;
 
     int oldNeglect = neglectLevel;
     bool oldHydrated = isHydrated;
@@ -155,41 +155,47 @@ void loop() {
     sensors_event_t humidity, temp;
     aht.getEvent(&humidity, &temp);
 
-    days = (float)(millis() - lastWateringTime) / 86400000UL;
-
     if (soilValue < 2000) { 
-      lastWateringTime = millis();
+      if (!isHydrated) { 
+         if (neglectLevel > 0) neglectLevel--;
+      }
+      lastWateringTime = currentMillis;
       isHydrated = true;
-      neglectLevel = 0;
-      streak = 0;
-      days = 0.0;
     }
     
-    if ((millis() - lastWateringTime) >= WATER_TIMEOUT || soilValue > 3000) {
+    if ((currentMillis - lastWateringTime) >= WATER_TIMEOUT || soilValue > 3000) {
       isHydrated = false;
     }
 
-    bool isNeglected = (soilValue > 3000 || (temp.temperature < TEMPERATURE && temp.temperature > 0) || humidity.relative_humidity < HUMIDITY_EXPOSURE);
-    
-    if (isNeglected && lightValue >= LIGHT_EXPOSURE) { 
-      int currentDayInt = (int)days;
-      if (currentDayInt != streak) {
-        streak = currentDayInt;
-        if (neglectLevel < 20) {
-          neglectLevel++;
-        }
+    if (lightValue >= LIGHT_EXPOSURE) {
+      lastLightTime = currentMillis;
+    }
+
+    if (currentMillis - lastCareCheckTime >= DAY_IN_MS) {
+      lastCareCheckTime = currentMillis;
+
+      if (currentMillis - lastLightTime >= DAY_IN_MS) {
+        if (neglectLevel < 20) neglectLevel++;
+        lastLightTime = currentMillis;
       }
-    } else {
-      if (neglectLevel > 0 && isHydrated) {
-        neglectLevel--;
+
+      // verificare environment
+      bool isEnvironmentBad = (soilValue > 3000 || (temp.temperature < TEMPERATURE && temp.temperature > 0) || humidity.relative_humidity < HUMIDITY_EXPOSURE);
+      
+      if (isEnvironmentBad || !isHydrated) {
+        if (neglectLevel < 20) neglectLevel++;
+      } else {
+        if (neglectLevel > 0) neglectLevel--;
       }
     }
 
+    // salvare memorie
     if (neglectLevel != oldNeglect || isHydrated != oldHydrated) {
       memory.putInt("neglect", neglectLevel);
       memory.putBool("hydrated", isHydrated);
     }
 
+    // setare stari
     currentPlantState = "neutral"; 
     
     if (lightValue < LIGHT_EXPOSURE) {
@@ -204,36 +210,29 @@ void loop() {
     else if (temp.temperature < TEMPERATURE && temp.temperature > 0) {
       currentPlantState = "cold";
     }
-    else if (temp.temperature >= TEMPERATURE && temp.temperature <= TEMPERATURE + 8.0 && soilValue < 1500 && lightValue > LIGHT_EXPOSURE + 300 && humidity.relative_humidity >= HUMIDITY_EXPOSURE) {
+    else if (temp.temperature >= TEMPERATURE && temp.temperature <= TEMPERATURE + 8.0 && soilValue < 1500 && humidity.relative_humidity >= HUMIDITY_EXPOSURE) {
       currentPlantState = "flower";
     }
     else if (temp.temperature >= TEMPERATURE && temp.temperature <= TEMPERATURE + 10.0 && soilValue < 2500) {
       currentPlantState = "happy";
     }
 
+    // debug info
     Serial.println("=================== DEBUG INFO =====================");
-    Serial.printf("State: %s | Neglect Level: %d | Streak: %d\n", currentPlantState.c_str(), neglectLevel, streak);
+    Serial.printf("State: %s | Neglect Level: %d\n", currentPlantState.c_str(), neglectLevel);
     Serial.printf("Soil: %d | Light: %d | Temp: %.1fC | Hum: %.1f%%\n", soilValue, lightValue, temp.temperature, humidity.relative_humidity);
-    Serial.printf("Days passed: %.2f | Is Hydrated: %s\n", days, isHydrated ? "YES" : "NO");
+    Serial.printf("Time in dark (hours): %.2f | Is Hydrated: %s\n", (float)(currentMillis - lastLightTime) / 3600000.0, isHydrated ? "YES" : "NO");
 
+    // animatii
     if (currentPlantState != previousPlantState) {
       
+      // iesire stare
       if (previousPlantState != "" && previousPlantState != "neutral") {
-        if (previousPlantState == "angry") {
-          playGif(blinkToAngry_reversed, sizeof(blinkToAngry_reversed), 1, true);
-        } 
-        else if (previousPlantState == "happy") {
-          playGif(blinkToHappy_reversed, sizeof(blinkToHappy_reversed), 1, true);
-        } 
-        else if (previousPlantState == "flower") {
-          playGif(blinkToFlower_reversed, sizeof(blinkToFlower_reversed), 1, true);
-        } 
-        else if (previousPlantState == "sad") {
-          playGif(blinkToSad_reversed, sizeof(blinkToSad_reversed), 1, true);
-        } 
-        else if (previousPlantState == "sleep") {
-          playGif(blinkToSleep_reversed, sizeof(blinkToSleep_reversed), 1, true);
-        }
+        if (previousPlantState == "angry") playGif(blinkToAngry_reversed, sizeof(blinkToAngry_reversed), 1, true);
+        else if (previousPlantState == "happy") playGif(blinkToHappy_reversed, sizeof(blinkToHappy_reversed), 1, true);
+        else if (previousPlantState == "flower") playGif(blinkToFlower_reversed, sizeof(blinkToFlower_reversed), 1, true);
+        else if (previousPlantState == "sad") playGif(blinkToSad_reversed, sizeof(blinkToSad_reversed), 1, true);
+        else if (previousPlantState == "sleep") playGif(blinkToSleep_reversed, sizeof(blinkToSleep_reversed), 1, true);
         else if (previousPlantState == "cold") {
           playGif(sadBlink, sizeof(sadBlink), 1, true);
           playGif(blinkToSad_reversed, sizeof(blinkToSad_reversed), 1, true);
@@ -241,6 +240,7 @@ void loop() {
         delay(100); 
       }
 
+      // intrare stare
       if (currentPlantState == "angry") {
         playGif(blinkToAngry, sizeof(blinkToAngry), 1, true);
         playGif(angryBlink, sizeof(angryBlink), 1, true);
@@ -271,8 +271,8 @@ void loop() {
       
       previousPlantState = currentPlantState;
     } 
-    
     else {
+      // animatii in timp ce sta in stare 
       if (currentPlantState == "sleep") {
         playGif(sleeping, sizeof(sleeping), 1, true);
       } 
